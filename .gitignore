@@ -31,9 +31,6 @@ logs/
 # Docs build artifacts (keep source)
 docs/screenshots/*.png.tmp
 
-# Out
-out/
-
 # Art local cache
 .art/
 

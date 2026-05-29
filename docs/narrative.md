@@ -1,11 +1,19 @@
-# SQL copilot RL on BIRD-SQL — the walkthrough
+# Serverless RL on BIRD-SQL
 
-A draft of the blog / customer-pitch narrative. The arc is dataset → reward
-function → first rollouts in Weave → training curve in W&B → held-out curve
-climbing → final drill-down.
+This is the story behind the repo: an **entire RL finetuning workflow that runs
+without a single piece of infrastructure you have to stand up yourself.** No GPU
+cluster, no inference server, no database host, no CI box. Every heavy
+component: GPU training, policy inference, and the execution-based reward, runs
+on **CoreWeave GPUs, served through Weights & Biases**: Serverless RL for the
+training loop, W&B Inference for generation, and wandb Serverless Sandboxes for execution.
+Your laptop (or a wandb sandbox) just orchestrates.
 
-> Replace bracketed `[…]` with the real run URLs and screenshot links before
-> publishing.
+We use SQL as the worked example because it makes the reward unambiguous, but the
+point is the stack: this is what a fully serverless post-training workflow looks
+like end to end. The arc runs dataset → W&B Registry → reward function → first rollouts in
+Weave → training curve in W&B → held-out curve climbing → final drill-down.
+
+For the clone-and-run quickstart, see [`README.md`](../README.md).
 
 ---
 
@@ -13,7 +21,7 @@ climbing → final drill-down.
 
 Every data-driven company has a "SQL copilot" project on the roadmap. The honest version of that project is: can a model take a question in English and a messy 30-table schema, and write SQL that *runs and returns the right rows*? Not SQL that compiles. Not SQL that looks correct. SQL that, when executed against the real database, returns the same result set as the analyst's gold query. That is the only definition of correctness an end user cares about.
 
-That's exactly what BIRD-SQL measures: 12,751 questions across 95 real-world SQLite databases — healthcare, finance, education, sports — paired with gold SQL and a "did it execute to the same answer" scoring rule. BIRD-dev sits around 65-70% for frontier models. Plenty of headroom.
+That's exactly what BIRD-SQL measures: 12,751 questions across 95 real-world SQLite databases —> healthcare, finance, education, sports; paired with gold SQL and a "did it execute to the same answer" scoring rule. BIRD-dev sits around 65-70% for frontier models. Plenty of headroom.
 
 ## 2. Why this is a perfect RL workload
 
@@ -44,6 +52,25 @@ The catch: you need somewhere safe to actually *run* arbitrary model-generated S
        └──────────────────────────────────────────────────────────┘
 ```
 
+The thing to notice: **every box in that loop runs on managed CoreWeave/W&B
+infra.** Nothing here provisions a node or boots a server.
+
+| In a normal RL setup you'd run… | Here it's served by… |
+|---|---|
+| A GPU training cluster + the GRPO optimizer | **Serverless RL** (ART `ServerlessBackend`) on CoreWeave |
+| A vLLM / TGI inference server for rollouts | **W&B Inference**, the same endpoint auto-updates to each new checkpoint |
+| A sandbox VM or DB host to execute SQL safely | **W&B Serverless Sandboxes**, warm-pooled for the run |
+| Experiment tracking + trace storage + eval infra | **W&B + Weave**, no collector to host |
+
+The orchestrator loop itself is a few hundred lines of Python; with
+`scripts/run_in_sandbox.py` even *that* runs in a sandbox, so the entire
+workflow can execute with nothing on your own hardware.
+
+And because the dataset enters each run through the **Registry**, the whole chain is captured as lineage automatically: the `upload-bird-*` run produces the dataset artifact, the training run declares it as an input, and every step emits a versioned LoRA checkpoint. All of it is walkable in the Artifacts graph.
+
+![W&B Artifacts lineage graph linking the dataset upload run, the bird-dev dataset artifact, the training run, and the LoRA checkpoint](screenshots/lora_lineage.png)
+*Lineage for one run: `upload-bird-dev` → the `bird-dev:v0` dataset artifact → the `sql-copilot-001-…` training run → its LoRA checkpoint `:v8`. The left rail lists each split as a Registry collection and every step's checkpoint version (`step1 … step15`).*
+
 ## 4. The reward function, in 60 seconds
 
 Open `src/reward.py`. The whole reward is one `@weave.op` named `score_sql`.
@@ -60,19 +87,21 @@ async def score_sql(model_sql, ref_sql, db_id, split="train"):
 
 Two design choices worth flagging:
 
-- **`mount_paths={...: "/data/dbs"}`** — the BIRD database folder is ~1GB and the same for every rollout. We mount it once when each sandbox is created; we never re-upload.
+- **Lazy per-DB pulls from the Registry** — the full split is one multi-GB artifact, so we never download the whole thing. The first time a sandbox sees a given `db_id`, an in-sandbox puller fetches just that one entry (`Artifact.get_entry(name).download(...)`) and caches it on that sandbox's filesystem; later rollouts on the same DB skip the download.
 - **`SandboxPool(size=12)`** — sandbox cold start is 5–15 seconds. At 32 rollouts/step × 500 steps we'd otherwise burn months in cold starts alone. A small pool of long-lived sandboxes amortises that cost over the run.
 
 ## 5. First rollouts in the Weave Traces UI
 
-After step 0, open the Weave Traces tab and look for ops named `rollout`. Each row is one trajectory. The columns we care about:
+Open the `traced_rollout` table in Weave. Each row is one trajectory, and the columns line the inputs up against the outcome:
 
-- `attributes.step` — the training step
-- `attributes.db_id` — which BIRD database
-- `attributes.difficulty` — `simple` / `moderate` / `challenging`
+- `difficulty` — `simple` / `moderate` / `challenging`
+- `question` — the natural-language ask
+- `sql` (the gold query) next to `model_sql` (what the policy wrote)
+- `split` — `dev` / `train`
 - `output.reward` — 0 or 1
+- `Run` / `Run Step` — which checkpoint and training step produced the row
 
-Filter by `step == 0 AND reward == 0` to see what the model gets wrong at the start. Expand one row and you see:
+Drop two filter chips — `output.reward = 0` and `wb_run_step = 0` — and you're staring at exactly what the model gets wrong at the very start (below). Expand any row and you get the full picture:
 
 - The exact user message we showed the model (schema + question)
 - The completion (in full, including any explanation it tried to add despite our system prompt)
@@ -80,58 +109,49 @@ Filter by `step == 0 AND reward == 0` to see what the model gets wrong at the st
 - A nested `score_sql` op with both result sets side by side
 - The reference SQL's result set, for contrast
 
-This is the part that's hard to do without Weave: at step 0 the model is wrong in *many* different ways. At step 500 it's still wrong in a few — but a *characteristic* few. Slicing by `db_id` and `difficulty` turns the failure modes into something a human can reason about.
+This is the part that's hard to do without Weave: at step 0 the model is wrong in *many* different ways. By the last step it's still wrong in a few — but a *characteristic* few. Slicing by `difficulty` and `Run Step` turns the failure modes into something a human can reason about.
 
-`[Insert screenshot: docs/screenshots/weave_traces_filtered.png]`
+![Weave traced_rollout table filtered to output.reward = 0 and wb_run_step = 0, showing question, gold sql, and model_sql side by side](screenshots/weave_panel_filtered.png)
+*The `traced_rollout` table filtered to `output.reward = 0` and `wb_run_step = 0`: every step-0 failure with its `question`, gold `sql`, and the model's `model_sql` side by side.*
 
 ## 6. Training health in the W&B Workspace
 
-Open the W&B run. Default panels you should see:
+Open the W&B run. Because the orchestrator installs `wandb.run` for ART, three families of panels populate on the shared `training_step` axis with nothing to wire up:
 
-| Panel | What it's telling you |
-|---|---|
-| `train/reward_mean` | The headline. Should climb. |
-| `train/loss` | GRPO policy loss. Smooth-ish, decreasing trend. |
-| `train/kl` | KL to the reference policy. Should stay bounded (~0.05–0.5). If it explodes, lower the learning rate. |
-| `train/completion_length` | Are completions getting shorter (good) or pathologically long (bad)? |
-| `dev/execution_match/exact/mean` | The generalisation curve. The headline of the headline. |
+- **`train/*`** — `reward_mean` is the headline (should climb); `loss`, `kl` (keep it bounded, ~0.05–0.5; if it explodes, drop the learning rate), and `completion_length` round out the GRPO health check.
+- **`cwsandbox/*`** — fleet health for the execution sandboxes, logged straight from the Serverless Sandboxes reporter (boot counts, exec latency, lifetimes). You get execution-infra observability for free.
+- **Eval panels** — the held-out `execution_match` curve from the periodic dev-200 passes, plus the rollout table up top.
 
-The relationship to watch: `train/reward_mean` climbs first, `dev/.../mean` lags by a few hundred steps, then climbs too. If `train` rises but `dev` doesn't, you're memorising. (Possible with BIRD's 95 databases.)
+The relationship to watch: `train/reward_mean` climbs first, the held-out curve lags by a few hundred steps, then follows. If `train` rises but the dev curve doesn't, you're memorising (a real risk with BIRD's 95 databases).
 
-`[Insert screenshot: docs/screenshots/wandb_workspace.png]`
+![W&B Workspace showing the rollout table and the auto-logged train, cwsandbox, and eval panel groups](screenshots/training_workspace.png)
+*One workspace: the per-rollout table up top, then the auto-logged `train/*`, `cwsandbox/*`, metrics.*
 
 ## 7. Held-out scoring in the Weave Evals tab
 
-Every 25 steps we re-run the same 200-row BIRD-dev subset against the auto-deployed Serverless RL endpoint for that step. Each pass shows up as its own row in Weave Evals, named `bird-dev-200-step-{N}`.
+Every few steps we re-run the same 200-row BIRD-dev subset against the checkpoint that step auto-deployed to W&B Inference. Each pass is its own evaluation, all bound to the same `SQLCopilot` model lineage.
 
-Comparison is what this UI is for. Pick the baseline pass and any later pass; Weave highlights:
+Comparison is what this UI is for. Pick a baseline pass and any later passes, and Weave lays them side by side:
 
-- Per-row deltas (which questions flipped 0→1, which flipped 1→0)
-- Per-scorer summary stats
-- Per-attribute slices (`difficulty`, `db_id`)
+- A **radar** across every scorer metric: `exact`, `non_trivial`, `had_error`, plus `Latency` and `Total Tokens`.
+- **Per-metric bars**: `execution_match.exact`, `execution_match.non_trivial`, `execution_match.had_error` so you see at a glance which passes moved.
+- A **metrics table**: with each eval's value and a color-coded delta vs. the baseline: a `+0.0150` on `exact` or a `−0.26s` on latency jumps out immediately.
 
-The "what is the model actually learning" story comes out of here. Healthcare schemas tend to win first; finance schemas with their gnarly date semantics tend to lag.
+For the "what is the model actually learning" story, switch to the **Dataset results** tab and drill into the rows that flipped 0↔1.
 
-`[Insert screenshot: docs/screenshots/weave_evals_compare.png]`
+![Weave Compare evaluations view with a radar chart, per-metric bar charts, and a metrics table of execution_match scores with deltas](screenshots/compare_evals.png)
+*Compare evaluations: a baseline pass against four later ones, with the `execution_match` scorer (`exact` / `non_trivial` / `had_error`), latency, and token counts shown as a radar, per-metric bars, and a delta table.*
 
-## 8. The drill-down ("what's it still getting wrong?")
-
-At step 500, take the Weave Evals view, filter to `exact == 0`, sort by `db_id`. You'll see clusters. Pick the heaviest cluster (probably a finance DB with timestamp arithmetic) and open three rows. Almost always you'll see:
-
-- The model used the wrong join key (BIRD has a lot of `subject_id`-vs-`id`-vs-`patient_no` ambiguity)
-- The model summed instead of counted
-- The model picked the right table but the wrong year filter
-
-That's the prompt-engineering / DPO / multi-turn-retry opportunity. The next phase of the demo.
-
-## 9. What we'd do next
+## 8. What we'd do next
 
 - **Schema linking**: rather than dump 30 tables of schema text, retrieve the top-K tables for each question. Cuts prompt cost ~10×, often *improves* accuracy.
 - **Multi-turn with execution feedback**: let the model see "your query errored with `no such column foo`" and retry. Same sandbox primitive, multiple `@weave.op` calls per trajectory.
 - **DPO on the rollout pairs**: every step produces K rollouts per prompt with reward ∈ {0,1}. The (winner, loser) pairs are free DPO data. Easier supervision than GRPO.
 
-## 10. Reproducing this
+## 9. Reproducing this
 
-Everything is in the repo. `python -m src.train_serverless` works on Serverless RL (preview access required). `python -m src.train_local` works on a 2×H100 box with vLLM. Both write to the same W&B project, both use the same reward function, both use the same Weave traces.
+Everything is in the repo, and the headline path needs **zero infrastructure of your own**: `python -m src.train_serverless` drives the whole loop against Serverless RL, W&B Inference, and Sandboxes (preview access required). The only non-serverless option is the explicit fallback — `python -m src.train_local` on a 2×H100 box with vLLM — which exists for air-gapped setups. Both write to the same W&B project, share the same reward function, and emit the same Weave traces.
+
+That's the takeaway: an end-to-end RL finetune — training, inference, execution rewards, eval, and tracing — running entirely on CoreWeave through Weights & Biases, with nothing to provision.
 
 See [`README.md`](../README.md) for the quickstart.

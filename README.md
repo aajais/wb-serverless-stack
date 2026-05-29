@@ -1,6 +1,8 @@
-# SQL Copilot — GRPO finetune on BIRD-SQL with execution rewards
+# SQL Copilot: Fully Serverless GRPO finetune on BIRD-SQL with execution rewards
 
-GRPO-finetune an open model (Qwen3-30B-A3B) to write SQL that **actually runs and returns the right rows**. The reward is execution-based: a [wandb Sandbox](https://docs.wandb.ai/sandboxes) runs both the model's SQL and the gold SQL and compares the result sets — no reward model, no LLM judge. The full stack is **W&B Serverless RL (via [ART](https://github.com/OpenPipe/ART)) + [Weave](https://weave-docs.wandb.ai/) + Sandboxes + [Registry](https://docs.wandb.ai/registry)**.
+GRPO-finetune an open model (Qwen3-30B-A3B) to write SQL that **actually runs and returns the right rows**. The reward is execution-based: a [wandb Sandbox](https://docs.wandb.ai/sandboxes) runs both the model's SQL and the gold SQL and compares the result sets, no reward model, no LLM judge. The full stack is **W&B Serverless RL (via [ART](https://github.com/OpenPipe/ART)) + [Weave](https://weave-docs.wandb.ai/) + Sandboxes + [Registry](https://docs.wandb.ai/registry)**.
+
+**Fully serverless: you never touch a GPU.** Training, inference, and the execution reward all run on managed W&B infra, and even the orchestrator can run inside a serverless sandbox, so nothing has to run on your machine.
 
 This README is the **clone-and-run guide**. For *why* the stack is built this way and how the pieces fit together, read the walkthrough: [`docs/narrative.md`](docs/narrative.md).
 
@@ -9,9 +11,9 @@ This README is the **clone-and-run guide**. For *why* the stack is built this wa
 ## Prerequisites
 
 - **Python ≥ 3.11** and [`uv`](https://docs.astral.sh/uv/) (the assumed package manager).
-- A **W&B account** with an API key — get yours at [wandb.ai/authorize](https://wandb.ai/authorize).
+- A **W&B account** with an API key —> get yours at [wandb.ai/authorize](https://wandb.ai/authorize).
 - **~32 GB free disk** for the BIRD dataset (~30 GB train + 1.4 GB dev).
-- **Serverless RL access** for the headline training run (preview). The smoke tests and baseline scoring work without it.
+- **Serverless RL access** for the headline training run. The smoke tests and baseline scoring work without it.
 
 ---
 
@@ -48,17 +50,7 @@ python -m data.make_dev_subset    # writes data/dev_200.jsonl (deterministic, se
 
 The dev subset is fully reproducible — `seed=0` yields the same 200 rows on any machine.
 
-## 4. Smoke-test the reward (no cloud needed)
-
-Verify the reward function end-to-end **in-process** (`FT_SD_LOCAL=1` bypasses the sandbox and runs sqlite3 locally — no sandbox credentials required):
-
-```bash
-python -m scripts.smoke_reward   # 5 hand-picked SQL pairs → expect 5/5 pass
-```
-
-There is no pytest suite; the `scripts/smoke_*.py` entrypoints are the tests. Run them after touching the reward or scoring code.
-
-## 5. Publish the data to W&B Registry (required for training)
+## 4. Publish the data to W&B Registry
 
 Training sandboxes pull each database from the Registry on demand. Publish each split **once** as a single aggregated artifact:
 
@@ -67,7 +59,7 @@ python -m data.registry_uploader upload-dataset --collection bird-dev   --root .
 python -m data.registry_uploader upload-dataset --collection bird-train --root ./data/bird/train
 ```
 
-Set `BIRD_REGISTRY_NAME` in `.env` to your registry. (You can skip this step if you only run the smoke tests or local baseline.)
+Set `BIRD_REGISTRY_NAME` in `.env` to your registry.
 
 ## 6. Get a baseline number
 
@@ -83,24 +75,24 @@ The checked-in `out/baseline.json` recorded **49% exact-match** (5% error rate) 
 ## 7. Train
 
 ```bash
-# Headline run (needs Serverless RL access)
+# Headline run (needs Serverless RL)
 python -m src.train_serverless --max-steps 500 --eval-every 25
 
-# Plumbing smoke — dev DBs only, fast, validates the whole loop
+# Dev DBs only, fast, validates the whole loop
 python -m src.train_serverless --data-source dev200 --max-steps 200
 ```
 
-Want it to survive closing your laptop? Run the same orchestrator inside a long-lived sandbox (the GPU work still happens on the fleet):
+Want it to survive closing your laptop? Run the same orchestrator inside serverless sandbox (the GPU work still happens on the CW fleet):
 
 ```bash
 python scripts/run_in_sandbox.py -- --data-source dev200 --max-steps 200 --eval-every 25
 ```
 
-Follow the run live in your W&B workspace: `train/reward` should climb, `val/execution_match/exact/mean` is the generalization curve, Weave **Traces** shows every rollout, and Weave **Evals** compares held-out passes step-over-step.
+Follow the run live in your W&B workspace, Weave **Traces** shows every rollout, and Weave **Evals** compares held-out passes step-over-step.
 
 ---
 
-## No Serverless RL access? Local fallback
+## Local fallback
 
 `src/train_local.py` is a **rollout + reward harness** (not a full GRPO loop): it reuses the same Weave + Sandbox + eval plumbing but writes `(prompt, completion, reward)` JSONL to `out/rollouts/` for your own optimizer to consume.
 
@@ -113,17 +105,10 @@ python -m src.train_local --max-steps 100
 
 ---
 
-## Lint
-
-```bash
-ruff check . && ruff format .   # line-length 100; selects E/F/I/W/UP, ignores E501
-```
-
 ## Notes for running this yourself
 
-- **All entrypoints run as modules** (`python -m src.train_serverless`), never as file paths — imports assume the package root is on the path.
+- **All entrypoints run as modules** (`python -m src.train_serverless`), never as file paths, imports assume the package root is on the path.
 - **`SANDBOX_MAX_LIFETIME_SEC` must exceed your run's wall-clock time** (default 4h). Pooled sandboxes live for the whole run; if the backend reaps one mid-training you get a cryptic gRPC `"Socket closed"`.
-- Architecture notes and load-bearing invariants for contributors live in [`CLAUDE.md`](CLAUDE.md).
 
 ---
 
@@ -131,7 +116,7 @@ ruff check . && ruff format .   # line-length 100; selects E/F/I/W/UP, ignores E
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Training | [W&B Serverless RL](https://docs.wandb.ai/serverless-rl) via [ART](https://github.com/OpenPipe/ART) | Free during preview |
+| Training | [W&B Serverless RL](https://docs.wandb.ai/serverless-rl) via [ART](https://github.com/OpenPipe/ART) | Runs on CoreWeave GPUs |
 | Base model (headline) | `Qwen/Qwen3-30B-A3B-Instruct-2507` | On the Serverless RL [supported list](https://docs.wandb.ai/serverless-rl/available-models) |
 | Base model (fallback) | `Qwen/Qwen3-Coder-30B-A3B-Instruct` | Used by `src/train_local.py` (TRL + vLLM) |
 | Execution / reward | [wandb Sandboxes](https://docs.wandb.ai/sandboxes) | sqlite3 in-process inside the sandbox |
