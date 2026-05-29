@@ -1,0 +1,54 @@
+[project]
+name = "ft-sd-demo"
+version = "0.1.0"
+description = "SQL Copilot RL finetune on BIRD-SQL with W&B Serverless RL + Weave + Sandboxes"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "ajaiswal@coreweave.com" }]
+
+dependencies = [
+    # W&B stack
+    "wandb[sandbox]",
+    "weave",
+    "openpipe-art",
+    # Data
+    "datasets>=3.0.0",
+    "requests>=2.32.0",
+    "tqdm>=4.66.0",
+    # SQL utilities
+    "sqlglot>=25.0.0",
+    # Inference client
+    "openai>=1.50.0",
+    # CLI polish
+    "rich>=13.7.0",
+    "typer>=0.12.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+# Local TRL+vLLM fallback path
+local-train = [
+    "trl>=0.12.0",
+    "transformers>=4.46.0",
+    "peft>=0.13.0",
+    "accelerate>=1.0.0",
+    "vllm>=0.6.0",
+    "torch>=2.4.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "data*", "scripts*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]

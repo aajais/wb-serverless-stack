@@ -1,0 +1,42 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Data — large; downloaded by data/download_bird.py
+data/bird/
+data/dev_200.jsonl
+*.sqlite
+*.sqlite3
+*.db
+
+# W&B / Weave local caches
+wandb/
+.wandb/
+artifacts/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Docs build artifacts (keep source)
+docs/screenshots/*.png.tmp
+
+# Out
+out/
+
+# Art local cache
+.art/
+
+# Tooling / local caches
+.ruff_cache/
+.claude/
