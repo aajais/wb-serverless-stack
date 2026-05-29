@@ -150,7 +150,7 @@ For the "what is the model actually learning" story, switch to the **Dataset res
 
 ## 9. Reproducing this
 
-Everything is in the repo, and the headline path needs **zero infrastructure of your own**: `python -m src.train_serverless` drives the whole loop against Serverless RL, W&B Inference, and Sandboxes (preview access required). The only non-serverless option is the explicit fallback — `python -m src.train_local` on a 2×H100 box with vLLM — which exists for air-gapped setups. Both write to the same W&B project, share the same reward function, and emit the same Weave traces.
+Everything is in the repo, and the headline path needs **zero infrastructure of your own**: `python -m src.train_serverless` drives the whole loop against Serverless RL, W&B Inference, and Sandboxes (preview access required). 
 
 That's the takeaway: an end-to-end RL finetune — training, inference, execution rewards, eval, and tracing — running entirely on CoreWeave through Weights & Biases, with nothing to provision.
 
