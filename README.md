@@ -1,21 +1,32 @@
-# SQL Copilot: Fully Serverless GRPO finetune on BIRD-SQL with execution rewards
+# Finetune an open model end-to-end on W&B + CoreWeave — no infra to stand up
 
-GRPO-finetune an open model (Qwen3-30B-A3B) to write SQL that **actually runs and returns the right rows**. The reward is execution-based: a [wandb Sandbox](https://docs.wandb.ai/sandboxes) runs both the model's SQL and the gold SQL and compares the result sets, no reward model, no LLM judge. The full stack is **W&B Serverless RL (via [ART](https://github.com/OpenPipe/ART)) + [Weave](https://weave-docs.wandb.ai/) + Sandboxes + [Registry](https://docs.wandb.ai/registry)**.
+This is a guided tour of the **W&B + CoreWeave product stack** for post-training: a complete RL finetune where the training, inference, execution, data, and observability are each a managed product, and **you never touch a GPU**. Nothing has to run on your machine, the orchestrator can even run inside a serverless sandbox.
 
-**Fully serverless: you never touch a GPU.** Training, inference, data, and the execution reward all run on managed CoreWeave infra, and even the orchestrator can run inside a serverless sandbox, so nothing has to run on your machine.
+The stack:
 
-This README is the **clone-and-run guide**. For *why* the stack is built this way and how the pieces fit together, read the walkthrough: [`docs/narrative.md`](docs/narrative.md).
+- **[W&B Serverless RL](https://docs.wandb.ai/serverless-rl)** (via [ART](https://github.com/OpenPipe/ART)) — the GRPO training loop, on CoreWeave GPUs.
+- **W&B Inference** — serves each new checkpoint for rollouts; the endpoint auto-updates as training advances.
+- **[W&B Serverless Sandboxes](https://docs.wandb.ai/sandboxes)** — safe execution of arbitrary model output, with fleet observability for free.
+- **[W&B Registry](https://docs.wandb.ai/registry)** — versioned datasets/artifacts and automatic lineage.
+- **[Weave](https://weave-docs.wandb.ai/)** — traces every rollout and runs held-out evals you can compare step-over-step.
+
+The **example workload** is SQL: we GRPO-finetune Qwen3-30B-A3B to write SQL that *actually runs and returns the right rows*, because that makes the reward unambiguous — a Sandbox runs both the model's SQL and the gold SQL and compares result sets, so there's no reward model and no LLM judge. Any execution-checkable task would exercise the same stack.
+
+This README is the **clone-and-run guide**. For *why* the stack is built this way and how the products fit together, read the walkthrough: [`docs/narrative.md`](docs/narrative.md).
 
 ---
 
 ## Stack at a glance
 
-| Layer | Choice | Notes |
+Every layer below is a managed W&B/CoreWeave product — you wire nothing up and provision no hardware:
+
+| Layer | Product | Notes |
 |---|---|---|
-| Training | [W&B Serverless RL](https://docs.wandb.ai/serverless-rl) via [ART](https://github.com/OpenPipe/ART) | Runs on CoreWeave GPUs |
+| Training | [W&B Serverless RL](https://docs.wandb.ai/serverless-rl) via [ART](https://github.com/OpenPipe/ART) | GRPO loop runs on CoreWeave GPUs |
+| Rollout inference | W&B Inference | Serves each checkpoint; endpoint auto-updates as training advances |
 | Base model | `Qwen/Qwen3-30B-A3B-Instruct-2507` | On the Serverless RL [supported list](https://docs.wandb.ai/serverless-rl/available-models) |
-| Execution / reward | [Serverless Sandboxes](https://docs.wandb.ai/sandboxes) | sqlite3 in-process inside the sandbox |
-| Data | [W&B Registry](https://docs.wandb.ai/registry) | One artifact per split, lazy per-DB entry pulls |
+| Execution / reward | [Serverless Sandboxes](https://docs.wandb.ai/sandboxes) | Runs arbitrary model output safely; sqlite3 in-process for this example |
+| Data | [W&B Registry](https://docs.wandb.ai/registry) | One artifact per split, lazy per-DB entry pulls, automatic lineage |
 | Tracing + held-out scoring | [Weave](https://weave-docs.wandb.ai/) | `@weave.op` rollouts + `weave.Evaluation` for dev-200 |
 
 ---
@@ -58,11 +69,9 @@ python -m data.download_bird      # ~30GB train + 1.4GB dev, into data/bird/
 python -m data.make_dev_subset    # writes data/dev_200.jsonl (deterministic, seed=0)
 ```
 
-The dev subset is fully reproducible — `seed=0` yields the same 200 rows on any machine.
-
 ## 4. Publish the data to W&B Registry
 
-Training sandboxes pull each database from the Registry on demand. Publish each split **once** as a single aggregated artifact:
+**W&B Registry** versions your datasets and records lineage automatically. Training sandboxes pull each database from the Registry on demand. Publish each split **once** as a single aggregated artifact:
 
 ```bash
 python -m data.registry_uploader upload-dataset --collection bird-dev   --root ./data/bird/dev
@@ -71,9 +80,9 @@ python -m data.registry_uploader upload-dataset --collection bird-train --root .
 
 Set `BIRD_REGISTRY_NAME` in `.env` to your registry.
 
-## 6. Get a baseline number
+## 5. Get a baseline number
 
-Score the base model on dev-200 before training, so you have something to compare against:
+Score the base model on dev-200 through **W&B Inference** and **Weave** before training, so you have something to compare against:
 
 ```bash
 python -m scripts.make_baseline --endpoint https://api.inference.wandb.ai/v1 --model Qwen/Qwen3-30B-A3B-Instruct-2507
@@ -82,7 +91,9 @@ python -m scripts.smoke_eval     # optional: quick ~10-row sanity pass
 
 The checked-in `out/baseline.json` recorded **49% exact-match** (5% error rate) for the base model.
 
-## 7. Train
+## 6. Train
+
+**W&B Serverless RL** drives the GRPO loop on CoreWeave GPUs, **W&B Inference** serves each new checkpoint, **Sandboxes** execute the reward, and **Weave** traces every rollout:
 
 ```bash
 # Headline run (needs Serverless RL)
@@ -100,4 +111,4 @@ python scripts/run_in_sandbox.py -- --data-source dev200 --max-steps 200 --eval-
 
 Follow the run live in your W&B workspace, Weave **Traces** shows every rollout, and Weave **Evals** compares held-out passes step-over-step.
 
-**Want the full story of how and why these clip together?** → [`docs/narrative.md`](docs/narrative.md)
+**Want the full story of how the product stack fits together?** → [`docs/narrative.md`](docs/narrative.md)
