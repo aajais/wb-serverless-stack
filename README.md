@@ -4,13 +4,13 @@ This is a guided tour of the **W&B + CoreWeave product stack** for post-training
 
 The stack:
 
-- **[W&B Serverless RL](https://docs.wandb.ai/serverless-rl)** (via [ART](https://github.com/OpenPipe/ART)) — the GRPO training loop, on CoreWeave GPUs.
-- **W&B Inference** — serves each new checkpoint for rollouts; the endpoint auto-updates as training advances.
-- **[W&B Serverless Sandboxes](https://docs.wandb.ai/sandboxes)** — safe execution of arbitrary model output, with fleet observability for free.
-- **[W&B Registry](https://docs.wandb.ai/registry)** — versioned datasets/artifacts and automatic lineage.
-- **[Weave](https://weave-docs.wandb.ai/)** — traces every rollout and runs held-out evals you can compare step-over-step.
+- **[W&B Serverless RL](https://docs.wandb.ai/serverless-rl)** (via [ART](https://github.com/OpenPipe/ART)) —> the GRPO training loop, on CoreWeave GPUs.
+- **W&B Inference** —> serves each new checkpoint for rollouts; the endpoint auto-updates as training advances.
+- **[W&B Serverless Sandboxes](https://docs.wandb.ai/sandboxes)** —> safe execution of arbitrary model output, with fleet observability for free.
+- **[W&B Registry](https://docs.wandb.ai/registry)** —> versioned datasets/artifacts and automatic lineage.
+- **[Weave](https://weave-docs.wandb.ai/)** —> traces every rollout and runs held-out evals you can compare step-over-step.
 
-The **example workload** is SQL: we GRPO-finetune Qwen3-30B-A3B to write SQL that *actually runs and returns the right rows*, because that makes the reward unambiguous — a Sandbox runs both the model's SQL and the gold SQL and compares result sets, so there's no reward model and no LLM judge. Any execution-checkable task would exercise the same stack.
+The **example workload** is SQL: we GRPO-finetune Qwen3-30B-A3B to write SQL that *actually runs and returns the right rows*, because that makes the reward unambiguous a Sandbox runs both the model's SQL and the gold SQL and compares result sets, so there's no reward model and no LLM judge. Any execution-checkable task would exercise the same stack.
 
 This README is the **clone-and-run guide**. For *why* the stack is built this way and how the products fit together, read the walkthrough: [`docs/narrative.md`](docs/narrative.md).
 
@@ -18,7 +18,7 @@ This README is the **clone-and-run guide**. For *why* the stack is built this wa
 
 ## Stack at a glance
 
-Every layer below is a managed W&B/CoreWeave product — you wire nothing up and provision no hardware:
+Every layer below is a managed W&B/CoreWeave product you wire nothing up and provision no hardware:
 
 | Layer | Product | Notes |
 |---|---|---|
@@ -33,7 +33,7 @@ Every layer below is a managed W&B/CoreWeave product — you wire nothing up and
 
 ## Prerequisites
 
-- **Python ≥ 3.11** and [`uv`](https://docs.astral.sh/uv/) (the assumed package manager).
+- **Python ≥ 3.11**.
 - A **W&B account** with an API key —> get yours at [wandb.ai/authorize](https://wandb.ai/authorize).
 
 ---
@@ -58,7 +58,7 @@ Open `.env` and fill in at minimum:
 |---|---|
 | `WANDB_API_KEY` | Your key from [wandb.ai/authorize](https://wandb.ai/authorize) |
 | `WANDB_ENTITY` | Your W&B team/username |
-| `WANDB_PROJECT` | Defaults to `sql-copilot-bird` — change if you like |
+| `WANDB_PROJECT` | Defaults to `sql-copilot-bird`, change if you like |
 
 Every other knob (step counts, learning rate, sandbox pool size, registry names) has a sane default in `.env.example`. `.env` is loaded once, by `src/config.py`; CLI flags override env, which overrides defaults.
 
