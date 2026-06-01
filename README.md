@@ -1,4 +1,4 @@
-# Finetune an open model end-to-end on W&B + CoreWeave — no infra to stand up
+# Finetune an open model end-to-end on W&B + CoreWeave without any infra to stand up
 
 This is a guided tour of the **W&B + CoreWeave product stack** for post-training: a complete RL finetune where the training, inference, execution, data, and observability are each a managed product, and **you never touch a GPU**. Nothing has to run on your machine, the orchestrator can even run inside a serverless sandbox.
 
